@@ -1,0 +1,106 @@
+# Windows 10 Security Hardening Script
+# Requires Administrative Privileges
+
+# Authorized Users List - Add your authorized usernames
+$usersToKeep = @()
+
+# Remove Unauthorized Local Users
+Get-LocalUser | Where-Object {$usersToKeep -notcontains $_.Name} | Remove-LocalUser -Confirm:$false
+
+# Privileged Admin Users - Add admin usernames
+$adminUsers = @()
+
+# Manage Local User Privileges
+$localUsers = Get-LocalUser
+$localUsers | ForEach-Object {
+    if ($adminUsers -contains $_.Name) {
+        Add-LocalGroupMember -Group "Administrators" -Member $_.Name -ErrorAction SilentlyContinue
+    } else {
+        Remove-LocalGroupMember -Group "Administrators" -Member $_.Name -ErrorAction SilentlyContinue
+    }
+}
+
+# Password Policy Enhancements
+$securityPolicies = @{
+    "PasswordHistorySize" = 5
+    "MaximumPasswordAge" = 30
+    "MinimumPasswordAge" = 10
+    "MinimumPasswordLength" = 12
+    "PasswordComplexity" = 1
+    "ClearTextPassword" = 0
+}
+
+# Apply Local Group Policy Settings
+foreach ($policy in $securityPolicies.Keys) {
+    $command = "net accounts /$policy=$($securityPolicies[$policy])"
+    Start-Process cmd.exe -ArgumentList "/c $command" -Wait
+}
+
+# Advanced Account Lockout Policy
+$lockoutPolicies = @{
+    "lockoutbadcount" = 5
+    "lockoutduration" = 30  # Minutes
+    "resetLockoutCount" = 30
+}
+
+# Apply Lockout Policies
+foreach ($policy in $lockoutPolicies.Keys) {
+    $command = "net accounts /$policy=$($lockoutPolicies[$policy])"
+    Start-Process cmd.exe -ArgumentList "/c $command" -Wait
+}
+
+# Comprehensive Audit Logging
+$auditCategories = @(
+    "Account Logon",
+    "Account Management", 
+    "Detailed Tracking",
+    "DS Access",
+    "Logon Events",
+    "Object Access",
+    "Policy Change",
+    "Privilege Use", 
+    "System"
+)
+
+# Enable Audit Logging
+$auditCategories | ForEach-Object {
+    auditpol /set /subcategory:"$_" /success:enable /failure:enable
+}
+
+# Disable Unnecessary Accounts
+Disable-LocalUser -Name "Guest" -ErrorAction SilentlyContinue
+Disable-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
+
+# Windows Update Configuration
+$UpdateSettings = (New-Object -ComObject "Microsoft.Update.AutoUpdate").Settings
+$UpdateSettings.NotificationLevel = 4  # Automatic downloads and updates
+$UpdateSettings.Save()
+
+# Windows Firewall Hardening
+$firewallRulesToDisable = @(
+    "Remote Assistance (DCOM-In)",
+    "Remote Assistance (PNRP-In)",
+    "Remote Assistance (RA Server TCP-In)",
+    "Telnet Server",
+    "netcat"
+)
+
+# Disable Specified Firewall Rules
+$firewallRulesToDisable | ForEach-Object {
+    Try {
+        Disable-NetFirewallRule -DisplayName $_
+    } Catch {
+        Write-Warning "Could not disable firewall rule: $_"
+    }
+}
+
+# Enable Windows Defender Real-Time Protection
+Set-MpPreference -DisableRealtimeMonitoring $false
+
+# Optional: Additional Defender Hardening
+Set-MpPreference -SubmitSamplesConsent 2  # Always send
+Set-MpPreference -MAPSReporting 2  # Advanced reporting
+
+Write-Host "Windows 10 Security Hardening Complete" -ForegroundColor Green
+
+
