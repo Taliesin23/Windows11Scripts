@@ -1,0 +1,127 @@
+# Function to check if a file might be suspicious
+function Test-SuspiciousFile {
+    param($file)
+    
+    $suspiciousIndicators = @{
+        Reason = @()
+        IsSuspicious = $false
+    }
+
+    # Check hidden attribute
+    if ($file.Attributes -match "Hidden") {
+        $suspiciousIndicators.Reason += "Hidden file"
+        $suspiciousIndicators.IsSuspicious = $true
+    }
+
+    # Check system locations
+    $systemPaths = @(
+        "C:\Windows\System32",
+        "C:\Windows\Tasks",
+        "C:\Windows\Temp",
+        "/etc",
+        "/tmp",
+        "C:\ProgramData"
+    )
+    if ($systemPaths | Where-Object { $file.FullName -like "$_*" }) {
+        $suspiciousIndicators.Reason += "Located in system directory"
+        $suspiciousIndicators.IsSuspicious = $true
+    }
+
+    # Check suspicious patterns in content (first 1000 bytes for performance)
+    try {
+        $content = Get-Content $file.FullName -TotalCount 10 -ErrorAction Stop
+        $suspiciousContent = @(
+            "password=",
+            "user=",
+            "root:",
+            "Administrator:",
+            "cmd.exe",
+            "powershell.exe",
+            "/bin/bash",
+            "nc ",
+            "netcat",
+            "base64"
+        )
+        
+        foreach ($pattern in $suspiciousContent) {
+            if ($content -match $pattern) {
+                $suspiciousIndicators.Reason += "Contains suspicious content: $pattern"
+                $suspiciousIndicators.IsSuspicious = $true
+            }
+        }
+    } catch {
+        $suspiciousIndicators.Reason += "Unable to read file content (access denied or in use)"
+    }
+
+    # Check file timestamps
+    $now = Get-Date
+    if ($file.LastWriteTime.Date -eq $now.Date) {
+        $suspiciousIndicators.Reason += "Modified today"
+        $suspiciousIndicators.IsSuspicious = $true
+    }
+
+    # Check unusual permissions
+    try {
+        $acl = Get-Acl $file.FullName -ErrorAction Stop
+        if ($acl.Access | Where-Object { $_.IdentityReference -match "Everyone" -and $_.FileSystemRights -match "FullControl|Modify" }) {
+            $suspiciousIndicators.Reason += "Overly permissive permissions"
+            $suspiciousIndicators.IsSuspicious = $true
+        }
+    } catch {
+        $suspiciousIndicators.Reason += "Unable to check permissions"
+    }
+
+    return $suspiciousIndicators
+}
+
+# Get the search path from user input
+$searchPath = Read-Host "Enter the path to search (e.g., C:\Users\YourName\Documents)"
+
+# Get the search pattern (optional)
+$searchPattern = Read-Host "Enter search pattern (press Enter for all .txt files)"
+if ([string]::IsNullOrWhiteSpace($searchPattern)) {
+    $searchPattern = "*.txt"
+}
+
+Write-Host "`nSearching for suspicious $searchPattern files in $searchPath..."
+try {
+    $files = Get-ChildItem -Path $searchPath -Filter $searchPattern -Recurse -File -Force -ErrorAction Stop
+    
+    if ($files.Count -eq 0) {
+        Write-Host "No matching files found."
+    } else {
+        $suspiciousCount = 0
+        Write-Host "`nAnalyzing $($files.Count) files...`n"
+        
+        foreach ($file in $files) {
+            $suspiciousCheck = Test-SuspiciousFile $file
+            
+            if ($suspiciousCheck.IsSuspicious) {
+                $suspiciousCount++
+                Write-Host "⚠️ SUSPICIOUS FILE DETECTED ⚠️" -ForegroundColor Red
+                Write-Host "File: $($file.Name)" -ForegroundColor Yellow
+                Write-Host "Path: $($file.FullName)" -ForegroundColor Yellow
+                Write-Host "Size: $([math]::Round($file.Length/1KB, 2)) KB"
+                Write-Host "Last Modified: $($file.LastWriteTime)"
+                Write-Host "Attributes: $($file.Attributes)"
+                Write-Host "Suspicious indicators:" -ForegroundColor Red
+                foreach ($reason in $suspiciousCheck.Reason) {
+                    Write-Host " - $reason" -ForegroundColor Red
+                }
+                Write-Host ""
+            } else {
+                Write-Host "File: $($file.Name)"
+                Write-Host "Path: $($file.FullName)"
+                Write-Host ""
+            }
+        }
+        
+        # Summary
+        Write-Host "`nSummary:"
+        Write-Host "Total files scanned: $($files.Count)"
+        Write-Host "Suspicious files found: $suspiciousCount" -ForegroundColor $(if ($suspiciousCount -gt 0) { "Red" } else { "Green" })
+        Write-Host "Hidden files: $(($files | Where-Object { $_.Attributes -match "Hidden" }).Count)"
+    }
+} catch {
+    Write-Host "Error occurred: $_" -ForegroundColor Red
+}
