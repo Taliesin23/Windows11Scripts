@@ -1,0 +1,95 @@
+# Function to scan file content for sensitive information
+function Find-SensitiveContent {
+    param($filePath)
+    
+    $sensitivePatterns = @{
+        'Password Pattern' = '(?i)password[\s]*[=:]+[\s]*\w+'
+        'Username Pattern' = '(?i)username[\s]*[=:]+[\s]*\w+'
+        'Email Pattern' = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+        'API Key Pattern' = '(?i)(api[_-]?key|access[_-]?token)[\s]*[=:]+[\s]*\w+'
+        'Private Key Header' = '-----BEGIN (?:RSA |DSA )?PRIVATE KEY-----'
+        'AWS Key Pattern' = '(?i)aws[\s]*[=:]+[\s]*\w+'
+        'Connection String' = '(?i)(connection[\s-]string|jdbc:)[\s]*[=:]+[\s]*\w+'
+    }
+
+    $results = @{
+        FilePath = $filePath
+        FoundPatterns = @()
+        LineNumbers = @()
+        Samples = @()
+    }
+
+    try {
+        $lineNumber = 0
+        $content = Get-Content $filePath -ErrorAction Stop
+        
+        foreach ($line in $content) {
+            $lineNumber++
+            
+            foreach ($pattern in $sensitivePatterns.GetEnumerator()) {
+                if ($line -match $pattern.Value) {
+                    $results.FoundPatterns += $pattern.Key
+                    $results.LineNumbers += $lineNumber
+                    # Redact the actual sensitive information in the sample
+                    $sanitizedLine = $line -replace '(?<=[:=]\s*)\S+', '[REDACTED]'
+                    $results.Samples += "Line $lineNumber: $sanitizedLine"
+                }
+            }
+        }
+    }
+    catch {
+        $results.FoundPatterns += "Error reading file: $($_.Exception.Message)"
+    }
+
+    return $results
+}
+
+# Get the search path
+$searchPath = Read-Host "Enter the path to search (e.g., C:\Users\YourName\Documents)"
+
+Write-Host "`nScanning for sensitive information in text files..."
+Write-Host "This may take some time depending on the number and size of files.`n"
+
+try {
+    # Get all text files including hidden ones
+    $files = Get-ChildItem -Path $searchPath -Include @("*.txt", "*.log", "*.config", "*.ini", "*.conf") -Recurse -File -Force -ErrorAction Stop
+    
+    $filesWithSensitiveInfo = 0
+    $totalSensitiveInstances = 0
+
+    foreach ($file in $files) {
+        $scanResults = Find-SensitiveContent $file.FullName
+        
+        if ($scanResults.FoundPatterns.Count -gt 0) {
+            $filesWithSensitiveInfo++
+            $totalSensitiveInstances += $scanResults.FoundPatterns.Count
+            
+            Write-Host "`n⚠️ SENSITIVE INFORMATION FOUND ⚠️" -ForegroundColor Red
+            Write-Host "File: $($file.FullName)" -ForegroundColor Yellow
+            Write-Host "Last Modified: $($file.LastWriteTime)"
+            Write-Host "Size: $([math]::Round($file.Length/1KB, 2)) KB"
+            Write-Host "Patterns Found:" -ForegroundColor Red
+            
+            for ($i = 0; $i -lt $scanResults.FoundPatterns.Count; $i++) {
+                Write-Host "  - $($scanResults.FoundPatterns[$i])" -ForegroundColor Red
+                Write-Host "    $($scanResults.Samples[$i])" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    # Summary
+    Write-Host "`n=== Scan Summary ===" -ForegroundColor Cyan
+    Write-Host "Total files scanned: $($files.Count)"
+    Write-Host "Files with sensitive information: $filesWithSensitiveInfo" -ForegroundColor $(if ($filesWithSensitiveInfo -gt 0) { "Red" } else { "Green" })
+    Write-Host "Total instances found: $totalSensitiveInstances" -ForegroundColor $(if ($totalSensitiveInstances -gt 0) { "Red" } else { "Green" })
+    
+    if ($filesWithSensitiveInfo -gt 0) {
+        Write-Host "`nRecommendation:" -ForegroundColor Yellow
+        Write-Host "- Review these files and remove or secure any sensitive information"
+        Write-Host "- Consider encrypting files containing necessary sensitive data"
+        Write-Host "- Update any exposed credentials immediately"
+    }
+}
+catch {
+    Write-Host "Error occurred: $_" -ForegroundColor Red
+}
