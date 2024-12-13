@@ -1,24 +1,6 @@
 # Windows 10 Security Hardening Script
 # Requires Administrative Privileges
 
-# Authorized Users List - Add your authorized usernames
-$usersToKeep = @()
-
-# Remove Unauthorized Local Users
-Get-LocalUser | Where-Object {$usersToKeep -notcontains $_.Name} | Remove-LocalUser -Confirm:$false
-
-# Privileged Admin Users - Add admin usernames
-$adminUsers = @()
-
-# Manage Local User Privileges
-$localUsers = Get-LocalUser
-$localUsers | ForEach-Object {
-    if ($adminUsers -contains $_.Name) {
-        Add-LocalGroupMember -Group "Administrators" -Member $_.Name -ErrorAction SilentlyContinue
-    } else {
-        Remove-LocalGroupMember -Group "Administrators" -Member $_.Name -ErrorAction SilentlyContinue
-    }
-}
 
 # Password Policy Enhancements
 $securityPolicies = @{
