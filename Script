@@ -1,88 +1,171 @@
 # Windows 10 Security Hardening Script
 # Requires Administrative Privileges
 
+# =======================
+# Elevation Check
+# =======================
+If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "This script must be run as Administrator. Exiting."
+    exit 1
+}
 
-# Password Policy Enhancements
+# =======================
+# Start Logging
+# =======================
+$logPath = "C:\Logs"
+if (-not (Test-Path $logPath)) {
+    New-Item -Path $logPath -ItemType Directory -Force
+}
+$logFile = "$logPath\SecurityHardening_$(Get-Date -Format yyyyMMdd_HHmmss).log"
+Start-Transcript -Path $logFile
+
+# =======================
+# Password Policy (Local)
+# =======================
+Write-Host "Configuring password policies..."
+
 $securityPolicies = @{
-    "PasswordHistorySize" = 5
-    "MaximumPasswordAge" = 30
-    "MinimumPasswordAge" = 10
-    "MinimumPasswordLength" = 12
-    "PasswordComplexity" = 1
-    "ClearTextPassword" = 0
+    "uniquepw" = 5 # Password history
+    "maxpwage" = 30 # Maximum password age (days)
+    "minpwage" = 10 # Minimum password age (days)
+    "minpwlen" = 12 # Minimum password length
 }
 
-# Apply Local Group Policy Settings
 foreach ($policy in $securityPolicies.Keys) {
-    $command = "net accounts /$policy=$($securityPolicies[$policy])"
-    Start-Process cmd.exe -ArgumentList "/c $command" -Wait
+    $command = "net accounts /$policy:$($securityPolicies[$policy])"
+    Write-Host "Applying: $command"
+    Start-Process cmd.exe -ArgumentList "/c $command" -Wait -NoNewWindow
 }
 
+# =======================
 # Advanced Account Lockout Policy
+# =======================
+Write-Host "Configuring lockout policies..."
+
 $lockoutPolicies = @{
-    "lockoutbadcount" = 5
-    "lockoutduration" = 30  # Minutes
-    "resetLockoutCount" = 30
+    "lockoutthreshold" = 5
+    "lockoutduration" = 30
+    "lockoutwindow" = 30
 }
 
-# Apply Lockout Policies
 foreach ($policy in $lockoutPolicies.Keys) {
-    $command = "net accounts /$policy=$($lockoutPolicies[$policy])"
-    Start-Process cmd.exe -ArgumentList "/c $command" -Wait
+    $command = "net accounts /$policy:$($lockoutPolicies[$policy])"
+    Write-Host "Applying: $command"
+    Start-Process cmd.exe -ArgumentList "/c $command" -Wait -NoNewWindow
 }
 
-# Comprehensive Audit Logging
+# =======================
+# Audit Logging Configuration
+# =======================
+Write-Host "Enabling audit logging..."
+
 $auditCategories = @(
     "Account Logon",
-    "Account Management", 
+    "Account Management",
     "Detailed Tracking",
     "DS Access",
-    "Logon Events",
+    "Logon",
     "Object Access",
     "Policy Change",
-    "Privilege Use", 
+    "Privilege Use",
     "System"
 )
 
-# Enable Audit Logging
-$auditCategories | ForEach-Object {
-    auditpol /set /subcategory:"$_" /success:enable /failure:enable
+foreach ($category in $auditCategories) {
+    try {
+        Write-Host "Enabling auditing for: $category"
+        Start-Process auditpol -ArgumentList "/set /subcategory:`"$category`" /success:enable /failure:enable" -Wait -NoNewWindow
+    } catch {
+        Write-Warning "Failed to set audit policy for: $category"
+    }
 }
 
+# =======================
 # Disable Unnecessary Accounts
-Disable-LocalUser -Name "Guest" -ErrorAction SilentlyContinue
-Disable-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
+# =======================
+Write-Host "Disabling unnecessary local accounts..."
 
-# Windows Update Configuration
-$UpdateSettings = (New-Object -ComObject "Microsoft.Update.AutoUpdate").Settings
-$UpdateSettings.NotificationLevel = 4  # Automatic downloads and updates
-$UpdateSettings.Save()
+# Disable Guest account
+Try {
+    Disable-LocalUser -Name "Guest" -ErrorAction Stop
+    Write-Host "Guest account disabled."
+} Catch {
+    Write-Warning "Failed to disable Guest account."
+}
 
-# Windows Firewall Hardening
+# Disable Administrator only if other admin accounts exist
+$otherAdmins = Get-LocalUser | Where-Object { $_.Enabled -and $_.Name -ne "Administrator" } | Where-Object {
+    (Get-LocalGroupMember -Group "Administrators").Name -contains $_.Name
+}
+
+if ($otherAdmins.Count -gt 0) {
+    Try {
+        Disable-LocalUser -Name "Administrator" -ErrorAction Stop
+        Write-Host "Built-in Administrator account disabled."
+    } Catch {
+        Write-Warning "Failed to disable Administrator account."
+    }
+} else {
+    Write-Warning "Cannot disable Administrator account: No other local admin accounts exist."
+}
+
+# =======================
+# Windows Update Configuration (Basic)
+# =======================
+Write-Host "Configuring automatic Windows updates..."
+
+Try {
+    $UpdateSettings = (New-Object -ComObject "Microsoft.Update.AutoUpdate").Settings
+    $UpdateSettings.NotificationLevel = 4 # Automatic download and install
+    $UpdateSettings.Save()
+    Write-Host "Windows Update configured for automatic updates."
+} Catch {
+    Write-Warning "Failed to configure Windows Update. Consider using GPO or WindowsUpdateProvider."
+}
+
+# =======================
+# Firewall Rule Hardening
+# =======================
+Write-Host "Disabling unwanted firewall rules..."
+
 $firewallRulesToDisable = @(
-    "Remote Assistance (DCOM-In)",
-    "Remote Assistance (PNRP-In)",
-    "Remote Assistance (RA Server TCP-In)",
+    "Remote Assistance",
     "Telnet Server",
     "netcat"
 )
 
-# Disable Specified Firewall Rules
-$firewallRulesToDisable | ForEach-Object {
-    Try {
-        Disable-NetFirewallRule -DisplayName $_
-    } Catch {
-        Write-Warning "Could not disable firewall rule: $_"
+foreach ($ruleName in $firewallRulesToDisable) {
+    $rules = Get-NetFirewallRule | Where-Object { $_.DisplayName -like "*$ruleName*" }
+    if ($rules) {
+        foreach ($rule in $rules) {
+            try {
+                Disable-NetFirewallRule -InputObject $rule -ErrorAction Stop
+                Write-Host "Disabled firewall rule: $($rule.DisplayName)"
+            } catch {
+                Write-Warning "Could not disable firewall rule: $($rule.DisplayName)"
+            }
+        }
+    } else {
+        Write-Warning "No firewall rule matching '$ruleName' was found."
     }
 }
 
-# Enable Windows Defender Real-Time Protection
-Set-MpPreference -DisableRealtimeMonitoring $false
+# =======================
+# Windows Defender Hardening
+# =======================
+Write-Host "Enabling Windows Defender real-time protection..."
 
-# Optional: Additional Defender Hardening
-Set-MpPreference -SubmitSamplesConsent 2  # Always send
-Set-MpPreference -MAPSReporting 2  # Advanced reporting
+Try {
+    Set-MpPreference -DisableRealtimeMonitoring $false
+    Set-MpPreference -SubmitSamplesConsent 2 # Always send samples
+    Set-MpPreference -MAPSReporting 2 # Advanced cloud protection
+    Write-Host "Windows Defender settings applied."
+} Catch {
+    Write-Warning "Failed to configure Windows Defender. Ensure Defender is installed and enabled."
+}
 
-Write-Host "Windows 10 Security Hardening Complete" -ForegroundColor Green
-
-
+# =======================
+# Completion
+# =======================
+Write-Host "Windows 10 Security Hardening Complete." -ForegroundColor Green
+Stop-Transcript
