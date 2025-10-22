@@ -110,17 +110,26 @@ if ($otherAdmins.Count -gt 0) {
 }
 
 # =======================
-# Windows Update Configuration (Basic)
+# Windows Update Configuration (Registry Method)
 # =======================
 Write-Host "Configuring automatic Windows updates..."
 
 Try {
-    $UpdateSettings = (New-Object -ComObject "Microsoft.Update.AutoUpdate").Settings
-    $UpdateSettings.NotificationLevel = 4 # Automatic download and install
-    $UpdateSettings.Save()
-    Write-Host "Windows Update configured for automatic updates."
+    # Create registry path if it doesn't exist
+    $auPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+    if (-not (Test-Path $auPath)) {
+        New-Item -Path $auPath -Force | Out-Null
+    }
+    
+    # Disable "No Auto Update"
+    Set-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Value 0 -Type DWord
+    
+    # Set to automatically download and install (option 4)
+    Set-ItemProperty -Path $auPath -Name "AUOptions" -Value 4 -Type DWord
+    
+    Write-Host "Windows Update configured for automatic updates via registry."
 } Catch {
-    Write-Warning "Failed to configure Windows Update. Consider using GPO or WindowsUpdateProvider."
+    Write-Warning "Failed to configure Windows Update. Error: $_"
 }
 
 # =======================
