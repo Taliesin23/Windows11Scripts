@@ -1,46 +1,54 @@
-# Windows 10 Security Hardening Script
+# Windows 11 CyberPatriots Security Hardening Script
 # Requires Administrative Privileges
+# Last Updated: 2025
 
 # =======================
 # Elevation Check
 # =======================
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Warning "This script must be run as Administrator. Exiting."
+    Read-Host "Press Enter to exit"
     exit 1
 }
 
 # =======================
 # Start Logging
 # =======================
-$logPath = "C:\Logs"
+$logPath = "C:\CyberPatriots_Logs"
 if (-not (Test-Path $logPath)) {
-    New-Item -Path $logPath -ItemType Directory -Force
+    New-Item -Path $logPath -ItemType Directory -Force | Out-Null
 }
 $logFile = "$logPath\SecurityHardening_$(Get-Date -Format yyyyMMdd_HHmmss).log"
 Start-Transcript -Path $logFile
 
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "Windows 11 CyberPatriots Hardening Script" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
 # =======================
 # Password Policy (Local)
 # =======================
-Write-Host "Configuring password policies..."
+Write-Host "[*] Configuring password policies..." -ForegroundColor Yellow
 
 $securityPolicies = @{
-    "uniquepw" = 5 # Password history
-    "maxpwage" = 30 # Maximum password age (days)
-    "minpwage" = 10 # Minimum password age (days)
-    "minpwlen" = 12 # Minimum password length
+    "uniquepw" = 5      # Password history
+    "maxpwage" = 60     # Maximum password age (days) - adjusted for Windows 11
+    "minpwage" = 1      # Minimum password age (days)
+    "minpwlen" = 14     # Minimum password length (14 recommended)
 }
 
 foreach ($policy in $securityPolicies.Keys) {
     $command = "net accounts /$policy:$($securityPolicies[$policy])"
-    Write-Host "Applying: $command"
-    Start-Process cmd.exe -ArgumentList "/c $command" -Wait -NoNewWindow
+    Write-Host "  Applying: $command"
+    Start-Process cmd.exe -ArgumentList "/c $command" -Wait -NoNewWindow -RedirectStandardError "$logPath\errors.txt"
 }
+Write-Host "[✓] Password policies configured." -ForegroundColor Green
 
 # =======================
-# Advanced Account Lockout Policy
+# Account Lockout Policy
 # =======================
-Write-Host "Configuring lockout policies..."
+Write-Host "[*] Configuring lockout policies..." -ForegroundColor Yellow
 
 $lockoutPolicies = @{
     "lockoutthreshold" = 5
@@ -50,131 +58,295 @@ $lockoutPolicies = @{
 
 foreach ($policy in $lockoutPolicies.Keys) {
     $command = "net accounts /$policy:$($lockoutPolicies[$policy])"
-    Write-Host "Applying: $command"
+    Write-Host "  Applying: $command"
     Start-Process cmd.exe -ArgumentList "/c $command" -Wait -NoNewWindow
 }
+Write-Host "[✓] Lockout policies configured." -ForegroundColor Green
 
 # =======================
 # Audit Logging Configuration
 # =======================
-Write-Host "Enabling audit logging..."
+Write-Host "[*] Enabling comprehensive audit logging..." -ForegroundColor Yellow
 
 $auditCategories = @(
+    "Logon/Logoff",
     "Account Logon",
     "Account Management",
-    "Detailed Tracking",
-    "DS Access",
-    "Logon",
-    "Object Access",
     "Policy Change",
     "Privilege Use",
-    "System"
+    "System",
+    "Object Access",
+    "Detailed Tracking"
 )
 
 foreach ($category in $auditCategories) {
     try {
-        Write-Host "Enabling auditing for: $category"
-        Start-Process auditpol -ArgumentList "/set /subcategory:`"$category`" /success:enable /failure:enable" -Wait -NoNewWindow
+        $result = auditpol /set /category:"$category" /success:enable /failure:enable 2>&1
+        Write-Host "  ✓ Enabled: $category"
     } catch {
-        Write-Warning "Failed to set audit policy for: $category"
+        Write-Warning "  ✗ Failed: $category"
     }
 }
+Write-Host "[✓] Audit logging enabled." -ForegroundColor Green
 
 # =======================
 # Disable Unnecessary Accounts
 # =======================
-Write-Host "Disabling unnecessary local accounts..."
+Write-Host "[*] Securing local accounts..." -ForegroundColor Yellow
 
 # Disable Guest account
 Try {
-    Disable-LocalUser -Name "Guest" -ErrorAction Stop
-    Write-Host "Guest account disabled."
-} Catch {
-    Write-Warning "Failed to disable Guest account."
-}
-
-# Disable Administrator only if other admin accounts exist
-$otherAdmins = Get-LocalUser | Where-Object { $_.Enabled -and $_.Name -ne "Administrator" } | Where-Object {
-    (Get-LocalGroupMember -Group "Administrators").Name -contains $_.Name
-}
-
-if ($otherAdmins.Count -gt 0) {
-    Try {
-        Disable-LocalUser -Name "Administrator" -ErrorAction Stop
-        Write-Host "Built-in Administrator account disabled."
-    } Catch {
-        Write-Warning "Failed to disable Administrator account."
+    $guest = Get-LocalUser -Name "Guest" -ErrorAction SilentlyContinue
+    if ($guest -and $guest.Enabled) {
+        Disable-LocalUser -Name "Guest" -ErrorAction Stop
+        Write-Host "  ✓ Guest account disabled."
+    } else {
+        Write-Host "  - Guest account already disabled or not found."
     }
-} else {
-    Write-Warning "Cannot disable Administrator account: No other local admin accounts exist."
+} Catch {
+    Write-Warning "  ✗ Failed to disable Guest account."
 }
 
+# Rename Administrator account (CyberPatriots best practice)
+Try {
+    $adminAccount = Get-LocalUser | Where-Object { $_.SID.Value -like "*-500" }
+    if ($adminAccount -and $adminAccount.Name -eq "Administrator") {
+        Rename-LocalUser -Name "Administrator" -NewName "CP_Admin"
+        Write-Host "  ✓ Administrator account renamed to CP_Admin."
+    }
+} Catch {
+    Write-Warning "  ✗ Could not rename Administrator account."
+}
+
+Write-Host "[✓] Account security configured." -ForegroundColor Green
+
 # =======================
-# Windows Update Configuration (Registry Method)
+# Windows Update Configuration
 # =======================
-Write-Host "Configuring automatic Windows updates..."
+Write-Host "[*] Configuring Windows Update..." -ForegroundColor Yellow
 
 Try {
-    # Create registry path if it doesn't exist
     $auPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
     if (-not (Test-Path $auPath)) {
         New-Item -Path $auPath -Force | Out-Null
     }
     
-    # Disable "No Auto Update"
     Set-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Value 0 -Type DWord
-    
-    # Set to automatically download and install (option 4)
     Set-ItemProperty -Path $auPath -Name "AUOptions" -Value 4 -Type DWord
+    Set-ItemProperty -Path $auPath -Name "ScheduledInstallDay" -Value 0 -Type DWord
+    Set-ItemProperty -Path $auPath -Name "ScheduledInstallTime" -Value 3 -Type DWord
     
-    Write-Host "Windows Update configured for automatic updates via registry."
+    # Also configure using Windows 11 method
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update" -Name "AUOptions" -Value 4 -Type DWord -ErrorAction SilentlyContinue
+    
+    Write-Host "  ✓ Automatic updates enabled."
 } Catch {
-    Write-Warning "Failed to configure Windows Update. Error: $_"
+    Write-Warning "  ✗ Failed to configure Windows Update."
 }
+Write-Host "[✓] Windows Update configured." -ForegroundColor Green
 
 # =======================
-# Firewall Rule Hardening
+# Windows Defender Configuration
 # =======================
-Write-Host "Disabling unwanted firewall rules..."
-
-$firewallRulesToDisable = @(
-    "Remote Assistance",
-    "Telnet Server",
-    "netcat"
-)
-
-foreach ($ruleName in $firewallRulesToDisable) {
-    $rules = Get-NetFirewallRule | Where-Object { $_.DisplayName -like "*$ruleName*" }
-    if ($rules) {
-        foreach ($rule in $rules) {
-            try {
-                Disable-NetFirewallRule -InputObject $rule -ErrorAction Stop
-                Write-Host "Disabled firewall rule: $($rule.DisplayName)"
-            } catch {
-                Write-Warning "Could not disable firewall rule: $($rule.DisplayName)"
-            }
-        }
-    } else {
-        Write-Warning "No firewall rule matching '$ruleName' was found."
-    }
-}
-
-# =======================
-# Windows Defender Hardening
-# =======================
-Write-Host "Enabling Windows Defender real-time protection..."
+Write-Host "[*] Hardening Windows Defender..." -ForegroundColor Yellow
 
 Try {
     Set-MpPreference -DisableRealtimeMonitoring $false
-    Set-MpPreference -SubmitSamplesConsent 2 # Always send samples
-    Set-MpPreference -MAPSReporting 2 # Advanced cloud protection
-    Write-Host "Windows Defender settings applied."
+    Set-MpPreference -SubmitSamplesConsent 2
+    Set-MpPreference -MAPSReporting 2
+    Set-MpPreference -PUAProtection 1
+    Set-MpPreference -DisableBlockAtFirstSeen $false
+    Set-MpPreference -CloudBlockLevel 2
+    Set-MpPreference -CloudExtendedTimeout 50
+    
+    # Update signatures
+    Update-MpSignature -ErrorAction SilentlyContinue
+    
+    Write-Host "  ✓ Windows Defender configured and updated."
 } Catch {
-    Write-Warning "Failed to configure Windows Defender. Ensure Defender is installed and enabled."
+    Write-Warning "  ✗ Failed to configure Windows Defender."
+}
+Write-Host "[✓] Windows Defender hardened." -ForegroundColor Green
+
+# =======================
+# Firewall Configuration
+# =======================
+Write-Host "[*] Configuring Windows Firewall..." -ForegroundColor Yellow
+
+# Enable firewall for all profiles
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True
+Write-Host "  ✓ Firewall enabled for all profiles."
+
+# Disable risky firewall rules
+$riskyRules = @(
+    "*Remote Assistance*",
+    "*Telnet*",
+    "*FTP*",
+    "*TFTP*"
+)
+
+foreach ($pattern in $riskyRules) {
+    $rules = Get-NetFirewallRule | Where-Object { $_.DisplayName -like $pattern -and $_.Enabled -eq $true }
+    foreach ($rule in $rules) {
+        try {
+            Disable-NetFirewallRule -Name $rule.Name -ErrorAction Stop
+            Write-Host "  ✓ Disabled: $($rule.DisplayName)"
+        } catch {
+            Write-Warning "  ✗ Could not disable: $($rule.DisplayName)"
+        }
+    }
+}
+Write-Host "[✓] Firewall configured." -ForegroundColor Green
+
+# =======================
+# Disable Unnecessary Services
+# =======================
+Write-Host "[*] Disabling unnecessary services..." -ForegroundColor Yellow
+
+$servicesToDisable = @(
+    "RemoteRegistry",
+    "RemoteAccess",
+    "Telephony",
+    "TlntSvr",
+    "FTPSVC",
+    "SSDPSRV",
+    "upnphost",
+    "WMPNetworkSvc",
+    "XblAuthManager",
+    "XblGameSave",
+    "XboxNetApiSvc",
+    "XboxGipSvc"
+)
+
+foreach ($svc in $servicesToDisable) {
+    $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($service) {
+        try {
+            Stop-Service -Name $svc -Force -ErrorAction Stop
+            Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
+            Write-Host "  ✓ Disabled: $svc"
+        } catch {
+            Write-Warning "  ✗ Could not disable: $svc"
+        }
+    }
+}
+Write-Host "[✓] Unnecessary services disabled." -ForegroundColor Green
+
+# =======================
+# Registry Security Settings
+# =======================
+Write-Host "[*] Applying registry security settings..." -ForegroundColor Yellow
+
+# Disable AutoRun/AutoPlay
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoDriveTypeAutoRun" -Value 255 -Type DWord -Force
+Write-Host "  ✓ AutoRun disabled."
+
+# Disable anonymous SID enumeration
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymousSAM" -Value 1 -Type DWord -Force
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymous" -Value 1 -Type DWord -Force
+Write-Host "  ✓ Anonymous access restricted."
+
+# Enable DEP and ASLR
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 1 -Type DWord -Force
+Write-Host "  ✓ SmartScreen enabled."
+
+# Disable LLMNR
+if (-not (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient")) {
+    New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Force | Out-Null
+}
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "EnableMulticast" -Value 0 -Type DWord -Force
+Write-Host "  ✓ LLMNR disabled."
+
+# Disable NetBIOS over TCP/IP
+$adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
+foreach ($adapter in $adapters) {
+    $adapter.SetTcpipNetbios(2) | Out-Null
+}
+Write-Host "  ✓ NetBIOS over TCP/IP disabled."
+
+Write-Host "[✓] Registry security settings applied." -ForegroundColor Green
+
+# =======================
+# Enable Advanced Security Features
+# =======================
+Write-Host "[*] Enabling Windows 11 security features..." -ForegroundColor Yellow
+
+# Enable Credential Guard (Windows 11 Pro+)
+Try {
+    $vbs = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction SilentlyContinue
+    if ($vbs) {
+        # Enable VBS and Credential Guard
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard" -Name "EnableVirtualizationBasedSecurity" -Value 1 -Type DWord -Force
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LsaCfgFlags" -Value 1 -Type DWord -Force
+        Write-Host "  ✓ Credential Guard enabled (requires reboot)."
+    }
+} Catch {
+    Write-Warning "  - Credential Guard configuration skipped."
+}
+
+# Enable Windows Defender Application Guard
+Try {
+    $wdag = Get-WindowsOptionalFeature -Online -FeatureName Windows-Defender-ApplicationGuard -ErrorAction SilentlyContinue
+    if ($wdag -and $wdag.State -ne "Enabled") {
+        Enable-WindowsOptionalFeature -Online -FeatureName Windows-Defender-ApplicationGuard -NoRestart -ErrorAction Stop
+        Write-Host "  ✓ Application Guard enabled."
+    }
+} Catch {
+    Write-Warning "  - Application Guard not available on this system."
+}
+
+Write-Host "[✓] Advanced security features configured." -ForegroundColor Green
+
+# =======================
+# User Account Audit
+# =======================
+Write-Host "[*] Auditing user accounts..." -ForegroundColor Yellow
+
+$users = Get-LocalUser | Where-Object { $_.Enabled -eq $true }
+Write-Host "  Active Local Users:" -ForegroundColor Cyan
+foreach ($user in $users) {
+    $groups = (Get-LocalGroup | Where-Object { (Get-LocalGroupMember -Group $_.Name -ErrorAction SilentlyContinue).Name -contains "$(hostname)\$($user.Name)" }).Name -join ", "
+    Write-Host "    - $($user.Name) | Groups: $groups"
+}
+
+$admins = Get-LocalGroupMember -Group "Administrators"
+Write-Host "  Administrators:" -ForegroundColor Cyan
+foreach ($admin in $admins) {
+    Write-Host "    - $($admin.Name)"
+}
+
+Write-Host "[✓] User audit complete." -ForegroundColor Green
+
+# =======================
+# Run Windows Defender Scan
+# =======================
+Write-Host "[*] Initiating Windows Defender quick scan..." -ForegroundColor Yellow
+Try {
+    Start-MpScan -ScanType QuickScan -ErrorAction Stop
+    Write-Host "  ✓ Quick scan initiated."
+} Catch {
+    Write-Warning "  ✗ Could not start scan."
 }
 
 # =======================
-# Completion
+# Completion Summary
 # =======================
-Write-Host "Windows 10 Security Hardening Complete." -ForegroundColor Green
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "Security Hardening Complete!" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Log saved to: $logFile" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "IMPORTANT NOTES:" -ForegroundColor Yellow
+Write-Host "1. Review the README file for forensics questions" -ForegroundColor White
+Write-Host "2. Check for unauthorized users and remove them" -ForegroundColor White
+Write-Host "3. Update all applications and remove prohibited software" -ForegroundColor White
+Write-Host "4. Review firewall rules for unauthorized services" -ForegroundColor White
+Write-Host "5. Enable BitLocker if required by scenario" -ForegroundColor White
+Write-Host "6. REBOOT REQUIRED for some changes to take effect" -ForegroundColor Red
+Write-Host ""
+
 Stop-Transcript
+
+Read-Host "Press Enter to exit"
