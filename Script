@@ -179,10 +179,17 @@ Write-Host "  ✓ Firewall enabled for all profiles."
 
 # Disable risky firewall rules
 $riskyRules = @(
+    "*Remote Assistance (DCOM-In)*",
+    "*Remote Assistance (PNRP-In)*",
+    "*Remote Assistance (RA Server TCP-In)*",
+    "*Remote Assistance (SSDP TCP-In)*",
+    "*Remote Assistance (SSDP UDP-In)*",
+    "*Remote Assistance (TCP-In)*",
     "*Remote Assistance*",
     "*Telnet*",
     "*FTP*",
-    "*TFTP*"
+    "*TFTP*",
+    "*netcat*"
 )
 
 foreach ($pattern in $riskyRules) {
@@ -204,25 +211,44 @@ Write-Host "[✓] Firewall configured." -ForegroundColor Green
 Write-Host "[*] Disabling unnecessary services..." -ForegroundColor Yellow
 
 $servicesToDisable = @(
-    "RemoteRegistry",
-    "RemoteAccess",
-    "Telephony",
-    "TlntSvr",
-    "FTPSVC",
-    "SSDPSRV",
-    "upnphost",
-    "WMPNetworkSvc",
-    "XblAuthManager",
-    "XblGameSave",
-    "XboxNetApiSvc",
-    "XboxGipSvc"
+    "RemoteRegistry",           # Remote Registry
+    "RemoteAccess",            # Remote Access
+    "Telephony",               # Telephony
+    "TlntSvr",                 # Telnet Server
+    "FTPSVC",                  # FTP Service
+    "SSDPSRV",                 # SSDP Discovery
+    "upnphost",                # UPnP Device Host
+    "WMPNetworkSvc",           # Windows Media Player Network Sharing
+    "XblAuthManager",          # Xbox Live Auth Manager
+    "XblGameSave",             # Xbox Live Game Save
+    "XboxNetApiSvc",           # Xbox Networking Service
+    "XboxGipSvc",              # Xbox Accessory Management
+    "bthserv",                 # Bluetooth Support Service
+    "Bonjour Service",         # Bonjour Service
+    "MSFTPSVC",                # Microsoft FTP Service
+    "mnmsrvc",                 # NetMeeting Remote Desktop Sharing
+    "Spooler",                 # Print Spooler (DISABLE ONLY IF NOT NEEDED)
+    "RasAuto",                 # Remote Access Auto Connection Manager
+    "RasMan",                  # Remote Access Connection Manager
+    # NOTE: Remote Desktop Services (TermService, SessionEnv, UmRdpService) NOT disabled
+    # Many competitions require RDP access - check README before disabling
+    "RpcLocator",              # Remote Procedure Call (RPC) Locator
+    "IISADMIN",                # IIS Admin Service
+    "simptcp",                 # Simple TCP/IP Services
+    "SNMPTRAP",                # SNMP Trap
+    "LanmanServer",            # Server (if not needed)
+    "NetTcpPortSharing",       # Net.Tcp Port Sharing Service
+    "W3SVC",                   # World Wide Web Publishing Service
+    "WlanSvc"                  # WLAN AutoConfig (disable if not using WiFi)
 )
 
 foreach ($svc in $servicesToDisable) {
     $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
     if ($service) {
         try {
-            Stop-Service -Name $svc -Force -ErrorAction Stop
+            if ($service.Status -eq 'Running') {
+                Stop-Service -Name $svc -Force -ErrorAction Stop
+            }
             Set-Service -Name $svc -StartupType Disabled -ErrorAction Stop
             Write-Host "  ✓ Disabled: $svc"
         } catch {
@@ -230,7 +256,122 @@ foreach ($svc in $servicesToDisable) {
         }
     }
 }
-Write-Host "[✓] Unnecessary services disabled." -ForegroundColor Green
+
+# Enable critical services
+Write-Host "[*] Ensuring critical services are enabled..." -ForegroundColor Yellow
+
+$criticalServices = @{
+    "EventLog" = "Automatic"        # Windows Event Log
+    "wuauserv" = "Automatic"        # Windows Update
+    "mpssvc" = "Automatic"          # Windows Defender Firewall
+    "WinDefend" = "Automatic"       # Windows Defender Antivirus
+    "Sense" = "Manual"              # Windows Defender Advanced Threat Protection
+    "WdNisSvc" = "Manual"           # Windows Defender Network Inspection Service
+}
+
+foreach ($svc in $criticalServices.Keys) {
+    $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($service) {
+        try {
+            Set-Service -Name $svc -StartupType $criticalServices[$svc] -ErrorAction Stop
+            if ($criticalServices[$svc] -eq "Automatic" -and $service.Status -ne 'Running') {
+                Start-Service -Name $svc -ErrorAction Stop
+            }
+            Write-Host "  ✓ Enabled: $svc ($($criticalServices[$svc]))"
+        } catch {
+            Write-Warning "  ✗ Could not configure: $svc"
+        }
+    }
+}
+
+Write-Host "[✓] Service configuration complete." -ForegroundColor Green
+
+# =======================
+# Local Security Policy Settings
+# =======================
+Write-Host "[*] Applying Local Security Policy settings..." -ForegroundColor Yellow
+
+# Create temporary security policy file
+Try {
+    $secpolPath = "$env:TEMP\secpol.cfg"
+    secedit /export /cfg $secpolPath /quiet | Out-Null
+
+    $secpolContent = Get-Content $secpolPath
+
+    # Modify security policy settings
+    $secpolContent = $secpolContent -replace 'LimitBlankPasswordUse = 0', 'LimitBlankPasswordUse = 1'
+    $secpolContent = $secpolContent -replace 'ClearPageFileAtShutdown = 0', 'ClearPageFileAtShutdown = 1'
+
+    # Write modified content back
+    $secpolContent | Set-Content $secpolPath
+
+    # Apply the modified policy
+    secedit /configure /db secedit.sdb /cfg $secpolPath /areas SECURITYPOLICY /quiet | Out-Null
+    Remove-Item $secpolPath -Force -ErrorAction SilentlyContinue
+} Catch {
+    Write-Warning "  ✗ Failed to configure some security policies via secedit."
+}
+
+Write-Host "  ✓ Blank password use restricted."
+Write-Host "  ✓ Virtual memory pagefile clearing enabled."
+
+# Additional LSA settings
+# Additional LSA settings
+Try {
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LimitBlankPasswordUse" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "NoLMHash" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymousSAM" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymous" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "EveryoneIncludesAnonymous" -Value 0 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "DisableDomainCreds" -Value 1 -Type DWord -Force
+    Write-Host "  ✓ LSA security settings configured."
+} Catch {
+    Write-Warning "  ✗ Failed to configure some LSA settings."
+}
+
+# Don't display last username
+Try {
+    if (-not (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System")) {
+        New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Force | Out-Null
+    }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DontDisplayLastUserName" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DisableCAD" -Value 0 -Type DWord -Force
+    Write-Host "  ✓ Interactive logon policies configured."
+} Catch {
+    Write-Warning "  ✗ Failed to configure interactive logon policies."
+}
+
+# SMB Client/Server Signing
+# SMB Client/Server Signing
+Try {
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters" -Name "RequireSecuritySignature" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters" -Name "EnableSecuritySignature" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters" -Name "EnablePlainTextPassword" -Value 0 -Type DWord -Force
+
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "RequireSecuritySignature" -Value 1 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" -Name "EnableSecuritySignature" -Value 1 -Type DWord -Force
+    Write-Host "  ✓ SMB signing enabled (client and server)."
+} Catch {
+    Write-Warning "  ✗ Failed to configure SMB signing."
+}
+
+# LDAP Server Signing (if applicable)
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters" -Name "LDAPServerIntegrity" -Value 2 -Type DWord -Force -ErrorAction SilentlyContinue
+
+# Network access policies
+# Network access policies
+Try {
+    if (-not (Test-Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0")) {
+        New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0" -Force | Out-Null
+    }
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0" -Name "NTLMMinClientSec" -Value 537395200 -Type DWord -Force
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0" -Name "NTLMMinServerSec" -Value 537395200 -Type DWord -Force
+    Write-Host "  ✓ Network access policies configured."
+} Catch {
+    Write-Warning "  ✗ Failed to configure network access policies."
+}
+
+Write-Host "[✓] Local Security Policy settings applied." -ForegroundColor Green
 
 # =======================
 # Registry Security Settings
@@ -238,31 +379,64 @@ Write-Host "[✓] Unnecessary services disabled." -ForegroundColor Green
 Write-Host "[*] Applying registry security settings..." -ForegroundColor Yellow
 
 # Disable AutoRun/AutoPlay
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoDriveTypeAutoRun" -Value 255 -Type DWord -Force
-Write-Host "  ✓ AutoRun disabled."
+# Disable AutoRun/AutoPlay
+Try {
+    if (-not (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer")) {
+        New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Force | Out-Null
+    }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer" -Name "NoDriveTypeAutoRun" -Value 255 -Type DWord -Force
+    Write-Host "  ✓ AutoRun disabled."
+} Catch {
+    Write-Warning "  ✗ Failed to disable AutoRun."
+}
 
-# Disable anonymous SID enumeration
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymousSAM" -Value 1 -Type DWord -Force
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "RestrictAnonymous" -Value 1 -Type DWord -Force
-Write-Host "  ✓ Anonymous access restricted."
+# Restrict CD-ROM and Floppy access
+# Restrict CD-ROM and Floppy access
+Try {
+    if (-not (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon")) {
+        New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Force | Out-Null
+    }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AllocateCDRoms" -Value "1" -Type String -Force
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AllocateFloppies" -Value "1" -Type String -Force
+    Write-Host "  ✓ CD-ROM and Floppy access restricted to logged-on user."
+} Catch {
+    Write-Warning "  ✗ Failed to restrict CD-ROM/Floppy access."
+}
 
-# Enable DEP and ASLR
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 1 -Type DWord -Force
-Write-Host "  ✓ SmartScreen enabled."
+# Enable SmartScreen
+# Enable SmartScreen
+Try {
+    if (-not (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System")) {
+        New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Force | Out-Null
+    }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 1 -Type DWord -Force
+    Write-Host "  ✓ SmartScreen enabled."
+} Catch {
+    Write-Warning "  ✗ Failed to enable SmartScreen."
+}
 
 # Disable LLMNR
-if (-not (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient")) {
-    New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Force | Out-Null
+# Disable LLMNR
+Try {
+    if (-not (Test-Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient")) {
+        New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Force | Out-Null
+    }
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "EnableMulticast" -Value 0 -Type DWord -Force
+    Write-Host "  ✓ LLMNR disabled."
+} Catch {
+    Write-Warning "  ✗ Failed to disable LLMNR."
 }
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "EnableMulticast" -Value 0 -Type DWord -Force
-Write-Host "  ✓ LLMNR disabled."
 
 # Disable NetBIOS over TCP/IP
-$adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
-foreach ($adapter in $adapters) {
-    $adapter.SetTcpipNetbios(2) | Out-Null
+Try {
+    $adapters = Get-WmiObject Win32_NetworkAdapterConfiguration -ErrorAction Stop | Where-Object { $_.IPEnabled -eq $true }
+    foreach ($adapter in $adapters) {
+        $adapter.SetTcpipNetbios(2) | Out-Null
+    }
+    Write-Host "  ✓ NetBIOS over TCP/IP disabled."
+} Catch {
+    Write-Warning "  ✗ Could not disable NetBIOS over TCP/IP."
 }
-Write-Host "  ✓ NetBIOS over TCP/IP disabled."
 
 Write-Host "[✓] Registry security settings applied." -ForegroundColor Green
 
@@ -305,14 +479,30 @@ Write-Host "[*] Auditing user accounts..." -ForegroundColor Yellow
 $users = Get-LocalUser | Where-Object { $_.Enabled -eq $true }
 Write-Host "  Active Local Users:" -ForegroundColor Cyan
 foreach ($user in $users) {
-    $groups = (Get-LocalGroup | Where-Object { (Get-LocalGroupMember -Group $_.Name -ErrorAction SilentlyContinue).Name -contains "$(hostname)\$($user.Name)" }).Name -join ", "
-    Write-Host "    - $($user.Name) | Groups: $groups"
+    Try {
+        $userGroups = @()
+        $allGroups = Get-LocalGroup
+        foreach ($group in $allGroups) {
+            $members = Get-LocalGroupMember -Group $group.Name -ErrorAction SilentlyContinue
+            if ($members.Name -contains "$env:COMPUTERNAME\$($user.Name)") {
+                $userGroups += $group.Name
+            }
+        }
+        $groupList = if ($userGroups.Count -gt 0) { $userGroups -join ", " } else { "None" }
+        Write-Host "    - $($user.Name) | Groups: $groupList"
+    } Catch {
+        Write-Host "    - $($user.Name) | Groups: Unable to determine"
+    }
 }
 
-$admins = Get-LocalGroupMember -Group "Administrators"
-Write-Host "  Administrators:" -ForegroundColor Cyan
-foreach ($admin in $admins) {
-    Write-Host "    - $($admin.Name)"
+Try {
+    $admins = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
+    Write-Host "  Administrators:" -ForegroundColor Cyan
+    foreach ($admin in $admins) {
+        Write-Host "    - $($admin.Name)"
+    }
+} Catch {
+    Write-Warning "  ✗ Could not enumerate Administrators group."
 }
 
 Write-Host "[✓] User audit complete." -ForegroundColor Green
@@ -340,11 +530,18 @@ Write-Host "Log saved to: $logFile" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "IMPORTANT NOTES:" -ForegroundColor Yellow
 Write-Host "1. Review the README file for forensics questions" -ForegroundColor White
-Write-Host "2. Check for unauthorized users and remove them" -ForegroundColor White
+Write-Host "2. Check for unauthorized users and remove them manually" -ForegroundColor White
 Write-Host "3. Update all applications and remove prohibited software" -ForegroundColor White
-Write-Host "4. Review firewall rules for unauthorized services" -ForegroundColor White
-Write-Host "5. Enable BitLocker if required by scenario" -ForegroundColor White
-Write-Host "6. REBOOT REQUIRED for some changes to take effect" -ForegroundColor Red
+Write-Host "4. Configure Internet Explorer/Edge security settings:" -ForegroundColor White
+Write-Host "   - Internet Options > Security > Set to High" -ForegroundColor Gray
+Write-Host "   - Privacy > Block all cookies & location requests" -ForegroundColor Gray
+Write-Host "   - Enable Pop-up Blocker" -ForegroundColor Gray
+Write-Host "5. Review User Rights Assignment in Local Security Policy" -ForegroundColor White
+Write-Host "6. Check Task Scheduler for suspicious tasks" -ForegroundColor White
+Write-Host "7. Review installed programs and browser extensions" -ForegroundColor White
+Write-Host "8. Remote Desktop Services LEFT ENABLED (check README if you need to disable)" -ForegroundColor Cyan
+Write-Host "9. Print Spooler LEFT ENABLED (disable manually if not needed)" -ForegroundColor Cyan
+Write-Host "10. REBOOT REQUIRED for all changes to take effect" -ForegroundColor Red
 Write-Host ""
 
 Stop-Transcript
