@@ -1,0 +1,732 @@
+#!/bin/bash
+
+# Ubuntu 22 CyberPatriot Hardening Script Collection
+# Run each section as needed - DO NOT run entire script blindly
+# Always read README and understand what services should remain active
+
+################################################################################
+# 1. INITIAL SETUP
+################################################################################
+
+# Create VM snapshot (VirtualBox - run from host machine)
+# VBoxManage snapshot "VM_NAME" take "pre-hardening"
+
+# Change password for a user (run for each user)
+change_user_password() {
+    read -p "Enter username to change password: " username
+    sudo passwd "$username"
+}
+
+# Disable guest login
+disable_guest_login() {
+    echo "Disabling guest login..."
+    if [ -f /etc/lightdm/lightdm.conf ]; then
+        sudo sh -c 'echo "allow-guest=false" >> /etc/lightdm/lightdm.conf'
+        echo "Guest login disabled. Restart LightDM to apply."
+    else
+        sudo mkdir -p /etc/lightdm
+        sudo sh -c 'echo "[Seat:*]" > /etc/lightdm/lightdm.conf'
+        sudo sh -c 'echo "allow-guest=false" >> /etc/lightdm/lightdm.conf'
+    fi
+}
+
+################################################################################
+# 2. SYSTEM UPDATES
+################################################################################
+
+system_updates() {
+    echo "Updating system packages..."
+    sudo apt update
+    sudo apt upgrade -y
+    sudo apt autoremove -y
+    sudo apt autoclean
+    
+    echo "Installing and configuring unattended upgrades..."
+    sudo apt install unattended-upgrades -y
+    sudo dpkg-reconfigure -plow unattended-upgrades
+    
+    echo "Review /etc/apt/sources.list and /etc/apt/sources.list.d/ manually"
+    echo "Remove any suspicious repositories"
+}
+
+################################################################################
+# 3. USER & GROUP MANAGEMENT
+################################################################################
+
+list_users() {
+    echo "Listing all users with login shells..."
+    awk -F: '$7 !~ /(nologin|false)/ {print $1}' /etc/passwd
+}
+
+delete_user() {
+    read -p "Enter username to delete: " username
+    sudo userdel -r "$username"
+    echo "User $username deleted"
+}
+
+lock_user() {
+    read -p "Enter username to lock: " username
+    sudo usermod -L "$username"
+    echo "User $username locked"
+}
+
+check_user_groups() {
+    read -p "Enter username to check groups: " username
+    groups "$username"
+}
+
+remove_from_sudo() {
+    read -p "Enter username to remove from sudo: " username
+    sudo deluser "$username" sudo
+    echo "$username removed from sudo group"
+}
+
+configure_password_aging() {
+    echo "Configuring password aging policies..."
+    sudo sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   90/' /etc/login.defs
+    sudo sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   7/' /etc/login.defs
+    sudo sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   14/' /etc/login.defs
+    sudo sed -i 's/^PASS_MIN_LEN.*/PASS_MIN_LEN    8/' /etc/login.defs
+    echo "Password aging configured in /etc/login.defs"
+}
+
+apply_password_aging_to_user() {
+    read -p "Enter username to apply password aging: " username
+    sudo chage -M 90 -m 7 -W 14 "$username"
+    echo "Password aging applied to $username"
+}
+
+install_pam_pwquality() {
+    echo "Installing and configuring PAM password quality..."
+    sudo apt install libpam-pwquality -y
+    
+    # Backup original file
+    sudo cp /etc/pam.d/common-password /etc/pam.d/common-password.bak
+    
+    # Check if line already exists
+    if grep -q "pam_pwquality.so" /etc/pam.d/common-password; then
+        sudo sed -i '/pam_pwquality.so/c\password requisite pam_pwquality.so retry=3 minlen=8 difok=3 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1' /etc/pam.d/common-password
+    else
+        sudo sed -i '/pam_unix.so/i password requisite pam_pwquality.so retry=3 minlen=8 difok=3 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1' /etc/pam.d/common-password
+    fi
+    echo "PAM password quality configured"
+}
+
+################################################################################
+# 4. SUDO & PRIVILEGE MANAGEMENT
+################################################################################
+
+configure_sudo_logging() {
+    echo "Configuring sudo logging..."
+    sudo mkdir -p /var/log/sudo
+    
+    # Create temporary sudoers file
+    TEMP_FILE=$(mktemp)
+    sudo cp /etc/sudoers "$TEMP_FILE"
+    
+    # Add logging configuration if not present
+    if ! sudo grep -q "Defaults logfile" /etc/sudoers; then
+        echo 'Defaults logfile="/var/log/sudo/sudo.log"' | sudo tee -a "$TEMP_FILE" > /dev/null
+        echo 'Defaults log_input, log_output' | sudo tee -a "$TEMP_FILE" > /dev/null
+        
+        # Validate and install
+        if sudo visudo -c -f "$TEMP_FILE"; then
+            sudo cp "$TEMP_FILE" /etc/sudoers
+            echo "Sudo logging enabled at /var/log/sudo/sudo.log"
+        else
+            echo "ERROR: Sudoers syntax error, changes not applied"
+        fi
+    else
+        echo "Sudo logging already configured"
+    fi
+    
+    sudo rm -f "$TEMP_FILE"
+    echo "MANUALLY review 'sudo visudo' to remove NOPASSWD entries!"
+}
+
+################################################################################
+# 5. SERVICE & DAEMON CONTROL
+################################################################################
+
+list_enabled_services() {
+    echo "Listing enabled services..."
+    systemctl list-unit-files --state=enabled
+}
+
+disable_common_services() {
+    echo "Disabling common unnecessary services..."
+    
+    services=(
+        "avahi-daemon"
+        "cups"
+        "cups-browsed"
+        "bluetooth"
+        "nfs-server"
+        "rpcbind"
+        "vsftpd"
+        "smbd"
+        "nmbd"
+    )
+    
+    for service in "${services[@]}"; do
+        if systemctl is-enabled "$service" 2>/dev/null | grep -q enabled; then
+            sudo systemctl disable --now "$service"
+            echo "Disabled: $service"
+        else
+            echo "Not found or already disabled: $service"
+        fi
+    done
+}
+
+list_timers() {
+    echo "Listing systemd timers..."
+    systemctl list-timers
+}
+
+################################################################################
+# 6. SSH HARDENING
+################################################################################
+
+harden_ssh() {
+    echo "Hardening SSH configuration..."
+    
+    # Backup original config
+    sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    
+    # Apply hardening settings
+    sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    sudo sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    sudo sed -i 's/^#*PermitEmptyPasswords.*/PermitEmptyPasswords no/' /etc/ssh/sshd_config
+    sudo sed -i 's/^#*X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
+    
+    # Add settings if they don't exist
+    if ! grep -q "^MaxAuthTries" /etc/ssh/sshd_config; then
+        echo "MaxAuthTries 3" | sudo tee -a /etc/ssh/sshd_config
+    fi
+    
+    if ! grep -q "^ClientAliveInterval" /etc/ssh/sshd_config; then
+        echo "ClientAliveInterval 300" | sudo tee -a /etc/ssh/sshd_config
+        echo "ClientAliveCountMax 2" | sudo tee -a /etc/ssh/sshd_config
+    fi
+    
+    # Create banner
+    echo "UNAUTHORIZED ACCESS TO THIS DEVICE IS PROHIBITED" | sudo tee /etc/ssh/banner
+    if ! grep -q "^Banner" /etc/ssh/sshd_config; then
+        echo "Banner /etc/ssh/banner" | sudo tee -a /etc/ssh/sshd_config
+    fi
+    
+    # Restart SSH
+    sudo systemctl restart sshd
+    echo "SSH hardened and restarted"
+}
+
+################################################################################
+# 7. FIREWALL (UFW)
+################################################################################
+
+configure_firewall() {
+    echo "Configuring UFW firewall..."
+    
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    
+    read -p "Allow SSH (port 22)? (y/n): " allow_ssh
+    if [ "$allow_ssh" = "y" ]; then
+        sudo ufw allow 22/tcp
+    fi
+    
+    read -p "Allow HTTP (port 80)? (y/n): " allow_http
+    if [ "$allow_http" = "y" ]; then
+        sudo ufw allow 80/tcp
+    fi
+    
+    read -p "Allow HTTPS (port 443)? (y/n): " allow_https
+    if [ "$allow_https" = "y" ]; then
+        sudo ufw allow 443/tcp
+    fi
+    
+    sudo ufw --force enable
+    sudo ufw status verbose
+}
+
+################################################################################
+# 8. APPARMOR
+################################################################################
+
+enable_apparmor() {
+    echo "Enabling AppArmor..."
+    sudo systemctl enable --now apparmor
+    sudo aa-status
+    echo "Review profiles and run 'sudo aa-enforce /etc/apparmor.d/*' carefully"
+}
+
+################################################################################
+# 9. KERNEL / NETWORK HARDENING
+################################################################################
+
+harden_network() {
+    echo "Configuring network hardening..."
+    
+    # Backup original file
+    sudo cp /etc/sysctl.conf /etc/sysctl.conf.bak
+    
+    # Add hardening parameters
+    cat << 'EOF' | sudo tee -a /etc/sysctl.conf
+
+# CyberPatriot Network Hardening
+net.ipv4.ip_forward=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+net.ipv4.conf.all.accept_source_route=0
+net.ipv4.conf.default.accept_source_route=0
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.default.accept_redirects=0
+net.ipv4.conf.all.secure_redirects=0
+net.ipv4.conf.default.secure_redirects=0
+net.ipv4.icmp_echo_ignore_broadcasts=1
+net.ipv4.icmp_ignore_bogus_error_responses=1
+net.ipv4.tcp_syncookies=1
+net.ipv4.conf.all.log_martians=1
+net.ipv4.conf.default.log_martians=1
+net.ipv6.conf.all.disable_ipv6=1
+net.ipv6.conf.default.disable_ipv6=1
+net.ipv6.conf.lo.disable_ipv6=1
+EOF
+    
+    # Apply settings
+    sudo sysctl -p
+    echo "Network hardening applied"
+}
+
+################################################################################
+# 10. BOOTLOADER SECURITY
+################################################################################
+
+secure_grub() {
+    echo "Securing GRUB bootloader..."
+    echo "You will be prompted to enter a GRUB password twice"
+    echo ""
+    
+    # Generate password hash
+    hash_output=$(grub-mkpasswd-pbkdf2)
+    grub_hash=$(echo "$hash_output" | grep "grub.pbkdf2" | cut -d' ' -f7)
+    
+    if [ -z "$grub_hash" ]; then
+        echo "Failed to generate GRUB password hash"
+        echo "You may need to run: sudo apt install grub-common"
+        return 1
+    fi
+    
+    # Backup existing custom config
+    if [ -f /etc/grub.d/40_custom ]; then
+        sudo cp /etc/grub.d/40_custom /etc/grub.d/40_custom.bak
+    fi
+    
+    # Configure GRUB
+    cat << EOF | sudo tee /etc/grub.d/40_custom
+#!/bin/sh
+exec tail -n +3 \$0
+set superusers="root"
+password_pbkdf2 root $grub_hash
+EOF
+    
+    sudo chmod +x /etc/grub.d/40_custom
+    sudo update-grub
+    
+    if [ -f /boot/grub/grub.cfg ]; then
+        sudo chmod 600 /boot/grub/grub.cfg
+        echo "GRUB secured with password"
+    else
+        echo "WARNING: /boot/grub/grub.cfg not found"
+    fi
+}
+
+################################################################################
+# 11. FILE PERMISSIONS & INTEGRITY
+################################################################################
+
+fix_critical_permissions() {
+    echo "Fixing critical file permissions..."
+    
+    sudo chmod 644 /etc/passwd
+    sudo chmod 640 /etc/shadow
+    sudo chown root:shadow /etc/shadow
+    sudo chmod 440 /etc/sudoers
+    
+    echo "Critical permissions fixed"
+}
+
+find_suid_sgid() {
+    echo "Finding SUID files..."
+    sudo find / -perm -4000 -type f 2>/dev/null > /tmp/suid_files.txt
+    
+    echo "Finding SGID files..."
+    sudo find / -perm -2000 -type f 2>/dev/null > /tmp/sgid_files.txt
+    
+    echo "SUID files saved to /tmp/suid_files.txt"
+    echo "SGID files saved to /tmp/sgid_files.txt"
+    echo "Review these files manually!"
+}
+
+install_aide() {
+    echo "Installing AIDE file integrity checker..."
+    sudo apt install aide -y
+    
+    echo "Initializing AIDE database (this may take several minutes)..."
+    sudo aideinit
+    
+    if [ -f /var/lib/aide/aide.db.new ]; then
+        sudo cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+        echo "AIDE database initialized"
+    else
+        echo "AIDE initialization failed"
+    fi
+}
+
+################################################################################
+# 12. LOGGING & MONITORING
+################################################################################
+
+configure_auditd() {
+    echo "Installing and configuring auditd..."
+    sudo apt install auditd audispd-plugins -y
+    sudo systemctl enable --now auditd
+    
+    # Add audit rules
+    cat << 'EOF' | sudo tee /etc/audit/rules.d/cyberpatriot.rules
+# Monitor critical file changes
+-w /etc/passwd -p wa -k passwd_changes
+-w /etc/shadow -p wa -k shadow_changes
+-w /etc/sudoers -p wa -k sudoers_changes
+-w /etc/sudoers.d/ -p wa -k sudoers_changes
+-w /var/log/auth.log -p wa -k auth_log_changes
+-w /etc/ssh/sshd_config -p wa -k sshd_config_changes
+EOF
+    
+    sudo augenrules --load
+    echo "Auditd configured and rules loaded"
+}
+
+################################################################################
+# 13. NETWORKING & DNS
+################################################################################
+
+check_network_config() {
+    echo "Checking /etc/hosts..."
+    cat /etc/hosts
+    echo ""
+    echo "Checking DNS configuration..."
+    cat /etc/resolv.conf
+    echo ""
+    echo "Review these files manually for suspicious entries!"
+}
+
+check_cron_jobs() {
+    echo "Checking cron jobs..."
+    echo "=== System crontab ==="
+    sudo crontab -l 2>/dev/null || echo "No system crontab"
+    echo ""
+    echo "=== User crontabs ==="
+    for user in $(cut -f1 -d: /etc/passwd); do
+        cron_output=$(sudo crontab -u "$user" -l 2>/dev/null)
+        if [ -n "$cron_output" ]; then
+            echo "Crontab for $user:"
+            echo "$cron_output"
+        fi
+    done
+    echo ""
+    echo "=== Cron directories ==="
+    ls -la /etc/cron.d/ 2>/dev/null
+    ls -la /etc/cron.daily/ 2>/dev/null
+    ls -la /etc/cron.hourly/ 2>/dev/null
+    ls -la /etc/cron.monthly/ 2>/dev/null
+    ls -la /etc/cron.weekly/ 2>/dev/null
+    echo ""
+    echo "=== Cron allow/deny files ==="
+    [ -f /etc/cron.allow ] && echo "cron.allow:" && cat /etc/cron.allow
+    [ -f /etc/cron.deny ] && echo "cron.deny:" && cat /etc/cron.deny
+    [ -f /etc/at.allow ] && echo "at.allow:" && cat /etc/at.allow
+    [ -f /etc/at.deny ] && echo "at.deny:" && cat /etc/at.deny
+    echo ""
+    echo "Review output above for suspicious entries"
+}
+
+################################################################################
+# 14. USB SECURITY
+################################################################################
+
+disable_usb_storage() {
+    echo "Disabling USB storage..."
+    echo "blacklist usb-storage" | sudo tee /etc/modprobe.d/usb-storage.conf
+    sudo update-initramfs -u
+    echo "USB storage disabled (requires reboot)"
+}
+
+################################################################################
+# 15. MALWARE & ROOTKIT SCANNING
+################################################################################
+
+install_clamav() {
+    echo "Installing ClamAV..."
+    sudo apt install clamav clamav-daemon -y
+    
+    echo "Updating virus definitions..."
+    sudo systemctl stop clamav-freshclam
+    sudo freshclam
+    sudo systemctl start clamav-freshclam
+    
+    echo "ClamAV installed. Run 'sudo clamscan -r -i /home' to scan"
+}
+
+scan_with_clamav() {
+    echo "Scanning home directories with ClamAV..."
+    sudo clamscan -r -i /home
+}
+
+install_rkhunter() {
+    echo "Installing rkhunter..."
+    sudo apt install rkhunter -y
+    sudo rkhunter --update
+    sudo rkhunter --propupd
+    
+    echo "Running rkhunter scan..."
+    sudo rkhunter --check --sk
+}
+
+install_chkrootkit() {
+    echo "Installing chkrootkit..."
+    sudo apt install chkrootkit -y
+    
+    echo "Running chkrootkit scan..."
+    sudo chkrootkit
+}
+
+################################################################################
+# 16. WEB SERVER HARDENING
+################################################################################
+
+harden_apache() {
+    echo "Hardening Apache2..."
+    
+    if ! command -v apache2 &> /dev/null; then
+        echo "Apache2 not installed"
+        return
+    fi
+    
+    if [ ! -f /etc/apache2/apache2.conf ]; then
+        echo "Apache2 config file not found"
+        return
+    fi
+    
+    # Backup config
+    sudo cp /etc/apache2/apache2.conf /etc/apache2/apache2.conf.bak
+    
+    # Check if security settings already exist
+    if ! grep -q "CyberPatriot Security Settings" /etc/apache2/apache2.conf; then
+        # Add security settings
+        cat << 'EOF' | sudo tee -a /etc/apache2/apache2.conf
+
+# CyberPatriot Security Settings
+<Directory /var/www/>
+    Options -Indexes
+</Directory>
+ServerTokens Prod
+ServerSignature Off
+EOF
+    else
+        echo "Security settings already present in apache2.conf"
+    fi
+    
+    # Disable modules if they exist
+    sudo a2dismod status 2>/dev/null || echo "status module not enabled"
+    sudo a2dismod autoindex 2>/dev/null || echo "autoindex module not enabled"
+    
+    # Test configuration before restart
+    if sudo apache2ctl configtest 2>&1 | grep -q "Syntax OK"; then
+        sudo systemctl restart apache2
+        echo "Apache2 hardened and restarted"
+    else
+        echo "Apache2 configuration test failed, not restarting"
+        sudo apache2ctl configtest
+    fi
+}
+
+harden_samba() {
+    echo "Hardening Samba..."
+    
+    if ! command -v smbd &> /dev/null; then
+        echo "Samba not installed"
+        return
+    fi
+    
+    if [ ! -f /etc/samba/smb.conf ]; then
+        echo "Samba config file not found"
+        return
+    fi
+    
+    sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.bak
+    
+    # Add settings to global section if not present
+    if ! grep -q "map to guest" /etc/samba/smb.conf; then
+        sudo sed -i '/\[global\]/a \   map to guest = never' /etc/samba/smb.conf
+    fi
+    
+    if ! grep -q "guest ok" /etc/samba/smb.conf; then
+        sudo sed -i '/\[global\]/a \   guest ok = no' /etc/samba/smb.conf
+    fi
+    
+    if ! grep -q "server min protocol" /etc/samba/smb.conf; then
+        sudo sed -i '/\[global\]/a \   server min protocol = SMB3' /etc/samba/smb.conf
+    fi
+    
+    sudo systemctl restart smbd 2>/dev/null
+    sudo systemctl restart nmbd 2>/dev/null
+    echo "Samba hardened"
+}
+
+harden_vsftpd() {
+    echo "Hardening vsftpd..."
+    
+    if [ ! -f /etc/vsftpd.conf ]; then
+        echo "vsftpd not installed"
+        return
+    fi
+    
+    sudo cp /etc/vsftpd.conf /etc/vsftpd.conf.bak
+    
+    sudo sed -i 's/^anonymous_enable=.*/anonymous_enable=NO/' /etc/vsftpd.conf
+    sudo sed -i 's/^#*chroot_local_user=.*/chroot_local_user=YES/' /etc/vsftpd.conf
+    
+    sudo systemctl restart vsftpd
+    echo "vsftpd hardened"
+}
+
+################################################################################
+# 17. EMAIL SERVER (POSTFIX)
+################################################################################
+
+harden_postfix() {
+    echo "Hardening Postfix..."
+    
+    if ! command -v postfix &> /dev/null; then
+        echo "Postfix not installed"
+        return
+    fi
+    
+    sudo cp /etc/postfix/main.cf /etc/postfix/main.cf.bak
+    
+    sudo postconf -e "inet_interfaces = localhost"
+    sudo postconf -e "mynetworks = 127.0.0.0/8"
+    
+    sudo systemctl restart postfix
+    echo "Postfix configured for localhost only"
+}
+
+################################################################################
+# 18. FINAL CHECKS
+################################################################################
+
+final_checks() {
+    echo "=== Final System Check ==="
+    echo ""
+    echo "Firewall Status:"
+    sudo ufw status verbose
+    echo ""
+    echo "Enabled Services:"
+    systemctl list-unit-files --state=enabled | grep enabled
+    echo ""
+    echo "Listening Ports:"
+    if command -v netstat &> /dev/null; then
+        sudo netstat -tulpn
+    else
+        sudo ss -tulpn
+    fi
+    echo ""
+    echo "Review output above. Reboot recommended: sudo reboot"
+}
+
+################################################################################
+# QUICK WINS - RUN THESE FIRST
+################################################################################
+
+quick_wins() {
+    echo "Running Quick Win commands..."
+    
+    sudo apt update && sudo apt upgrade -y
+    sudo ufw enable
+    sudo ufw default deny incoming
+    disable_guest_login
+    sudo apt install libpam-pwquality -y
+    
+    echo "Quick wins complete!"
+    echo "Remember to change all user passwords manually!"
+}
+
+################################################################################
+# MAIN MENU
+################################################################################
+
+show_menu() {
+    echo ""
+    echo "======================================"
+    echo "Ubuntu 22 CyberPatriot Hardening"
+    echo "======================================"
+    echo "1.  Quick Wins (Run First)"
+    echo "2.  Disable Guest Login"
+    echo "3.  System Updates"
+    echo "4.  Configure Password Policies"
+    echo "5.  Configure Sudo Logging"
+    echo "6.  Disable Unnecessary Services"
+    echo "7.  Harden SSH"
+    echo "8.  Configure Firewall"
+    echo "9.  Enable AppArmor"
+    echo "10. Network Hardening"
+    echo "11. Fix File Permissions"
+    echo "12. Configure Auditd"
+    echo "13. Disable USB Storage"
+    echo "14. Install Malware Scanners"
+    echo "15. Harden Apache"
+    echo "16. Harden Samba"
+    echo "17. Harden vsftpd"
+    echo "18. Harden Postfix"
+    echo "19. Final System Check"
+    echo "20. List Users"
+    echo "21. Find SUID/SGID Files"
+    echo "0.  Exit"
+    echo "======================================"
+}
+
+# Main loop
+while true; do
+    show_menu
+    read -p "Select option: " choice
+    
+    case $choice in
+        1) quick_wins ;;
+        2) disable_guest_login ;;
+        3) system_updates ;;
+        4) configure_password_aging; install_pam_pwquality ;;
+        5) configure_sudo_logging ;;
+        6) disable_common_services ;;
+        7) harden_ssh ;;
+        8) configure_firewall ;;
+        9) enable_apparmor ;;
+        10) harden_network ;;
+        11) fix_critical_permissions ;;
+        12) configure_auditd ;;
+        13) disable_usb_storage ;;
+        14) install_clamav; install_rkhunter; install_chkrootkit ;;
+        15) harden_apache ;;
+        16) harden_samba ;;
+        17) harden_vsftpd ;;
+        18) harden_postfix ;;
+        19) final_checks ;;
+        20) list_users ;;
+        21) find_suid_sgid ;;
+        0) echo "Exiting..."; exit 0 ;;
+        *) echo "Invalid option" ;;
+    esac
+    
+    read -p "Press Enter to continue..."
+done
